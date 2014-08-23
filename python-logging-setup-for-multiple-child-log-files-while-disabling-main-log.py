@@ -1,5 +1,4 @@
 import logging
-import sys
 
 
 DEFAULT_LOG_FORMAT = "%(asctime)s [%(levelname)s]: %(message)s"
@@ -12,14 +11,14 @@ class DynamicHandlerLogger(logging.Logger):
     def __init__(self, name, level=logging.NOTSET, handler_factory=None):
         super(DynamicHandlerLogger, self).__init__(name, level=level)
         self.handler_factory = handler_factory
+        self._handler_cache = {}
 
     def handle(self, record):
-
         selector = getattr(record, self.selector, None)
-        if selector:
+        if selector and selector not in self._handler_cache:
             newHandler = self.handler_factory(self.name, selector)
             self.addHandler(newHandler)
-
+            self._handler_cache[selector] = newHandler
         return super(DynamicHandlerLogger, self).handle(record)
 
 
@@ -45,14 +44,6 @@ class MainFilter(logging.Filter):
         return not server_filter(record)
 
 
-def streaming_handler_factory(name, selector):
-    handler = logging.StreamHandler(sys.stdout)
-    formatter = logging.Formatter(DEFAULT_LOG_FORMAT)
-    handler.setFormatter(formatter)
-    handler.addFilter(ServerFilter(selector))
-    return handler
-
-
 def file_handler_factory(name, selector):
     handler = logging.FileHandler(filename="%s.%s.log"%(name, selector), encoding="utf-8", mode="a")
     formatter = logging.Formatter(DEFAULT_LOG_FORMAT)
@@ -61,32 +52,20 @@ def file_handler_factory(name, selector):
     return handler
 
 
-TO_FILE = True
-if TO_FILE:
-    logger = DynamicHandlerLogger("my.company", handler_factory=file_handler_factory)
-    logger.setLevel(DEFAULT_LOG_LEVEL)
-    handler = logging.FileHandler(filename="my.company.log", encoding="utf-8", mode="a")
-    handler.addFilter(MainFilter())
-    handler.setLevel(DEFAULT_LOG_LEVEL)
-    formatter = logging.Formatter(DEFAULT_LOG_FORMAT)
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-else:
-    logger = DynamicHandlerLogger("my.company", handler_factory=streaming_handler_factory)
-    logger.setLevel(DEFAULT_LOG_LEVEL)
-    handler = logging.StreamHandler(sys.stdout)
-    handler.addFilter(MainFilter())
-    handler.setLevel(DEFAULT_LOG_LEVEL)
-    formatter = logging.Formatter(DEFAULT_LOG_FORMAT)
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
+logger = DynamicHandlerLogger("my.company", handler_factory=file_handler_factory)
+logger.setLevel(DEFAULT_LOG_LEVEL)
+handler = logging.FileHandler(filename="my.company.log", encoding="utf-8", mode="a")
+handler.addFilter(MainFilter())
+handler.setLevel(DEFAULT_LOG_LEVEL)
+formatter = logging.Formatter(DEFAULT_LOG_FORMAT)
+handler.setFormatter(formatter)
+logger.addHandler(handler)
 
 
 def process(server):
-    #logger.info("This should show up only in the server-specific log file for %s", server, extra={"server": server})
     server_logger = logging.LoggerAdapter(logger, {'server': server})
     server_logger.info("This should show up only in the server-specific log file for %s", server)
-    server_logger.info("another log message")
+    server_logger.info("another log message for %s", server)
 
 
 def main():

@@ -1,0 +1,203 @@
+This is an interesting problem.  As I thought through it I initially thought that we could accomplish this will `logger.addChild` but that won't create new `Handler` objects nor will it add the filters you need.
+
+For example, right now you could vary your logger for each server doing something like this:
+
+    logger = logging.getLogger("my.company")
+
+    def process(server)
+        server_logger = logger.getChild("server1")
+        server_logger.log()
+
+However, you actually want a different handler for each server.  Because `Logger` objects can support multiple handlers, and because both loggers and handlers have filtering behavior it seems like you can get the behavior you actually want with a single `Logger` configured to dynamically create handlers based on `extra` data like a `server` parameter.
+
+## Context
+
+The first step is to setup context we can use to determine what and where to log things.
+
+To accomplish this I assume you're willing to add metadata to your log messages either at the site or through a `LoggerAdaptor`.
+
+To just add the extra "server" key when you log:
+
+    logger.info("I'm a server message %s", example_arg, extra=dict(server, "server7"))
+
+To setup a logging adapter so you can set this contextual information once and not on every `logger.info` call:
+
+    server_logger = logging.LoggerAdapter(logger, {'server': server})
+    server_logger.info("This should show up only in the server-specific log file for %s", server)
+    # user server logger as much as you like, and only specify the context server value
+    # once
+    server_logger.info("More logs!")
+
+## Dynamically Creating Log Handlers
+
+There are probably other ways to do this, but this seems reasonably clean to me.  Basically, create a new handler based on this metadata we've provided above.
+
+    class DynamicHandlerLogger(logging.Logger):
+        selector = "server"
+
+Note the `selector` class attribute above.  You could probably customize that as an instance attribute if you wanted to have multiple loggers like this.
+
+        def __init__(self, name, level=logging.NOTSET, handler_factory=None):
+            super(DynamicHandlerLogger, self).__init__(name, level=level)
+            self.handler_factory = handler_factory
+            self._handler_cache = {}
+
+        def handle(self, record):
+            selector = getattr(record, self.selector, None)
+            if selector and selector not in self._handler_cache:
+                newHandler = self.handler_factory(self.name, selector)
+                self.addHandler(newHandler)
+                self._handler_cache[selector] = newHandler
+            return super(DynamicHandlerLogger, self).handle(record)
+
+As you can see, the `handler_factory` is my way of generating new handlers dynamically as we attempt to handle log messages.  The signature is just:
+
+    def factory(name, selector):
+        """
+        Returns a new handler
+
+        `name` is the logger name, `selector` is the key we're matching on
+        (and part of our filter criteria).
+        """
+
+Also note we only create a handler for a given server name once.
+
+If we stop here, we'll end up creating a log file per server, but our messages
+will end up going to every logger which is definitely not what we want.
+
+## Filtering
+
+Let's go ahead and implement some basic filtering based on the server name using the `handler.addFilter` method.
+
+    def server_filter(record):
+        server = getattr(record, "server", None)
+        return True if server else False
+
+
+    class ServerFilter(logging.Filter):
+        def __init__(self, server_name, name=''):
+            super(ServerFilter, self).__init__(name=name)
+            self.server_name = server_name
+
+        def filter(self, record):
+            server = getattr(record, "server", None)
+            if server and server == self.server_name:
+                return True
+            return False
+
+
+    class MainFilter(logging.Filter):
+        def filter(self, record):
+            return not server_filter(record)
+
+Now, let's define a `handler_factory` and create our primary logger:
+
+    def file_handler_factory(name, selector):
+        handler = logging.FileHandler(filename="%s.%s.log"%(name, selector), encoding="utf-8", mode="a")
+        formatter = logging.Formatter(DEFAULT_LOG_FORMAT)
+        handler.setFormatter(formatter)
+        handler.addFilter(ServerFilter(selector))
+        return handler
+
+
+    logger = DynamicHandlerLogger("my.company", handler_factory=file_handler_factory)
+    logger.setLevel(DEFAULT_LOG_LEVEL)
+    handler = logging.FileHandler(filename="my.company.log", encoding="utf-8", mode="a")
+    handler.addFilter(MainFilter())
+    handler.setLevel(DEFAULT_LOG_LEVEL)
+    formatter = logging.Formatter(DEFAULT_LOG_FORMAT)
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+## Complete Code
+
+    import logging
+
+
+    DEFAULT_LOG_FORMAT = "%(asctime)s [%(levelname)s]: %(message)s"
+    DEFAULT_LOG_LEVEL = logging.INFO
+
+
+    class DynamicHandlerLogger(logging.Logger):
+        selector = "server"
+
+        def __init__(self, name, level=logging.NOTSET, handler_factory=None):
+            super(DynamicHandlerLogger, self).__init__(name, level=level)
+            self.handler_factory = handler_factory
+            self._handler_cache = {}
+
+        def handle(self, record):
+            selector = getattr(record, self.selector, None)
+            if selector and selector not in self._handler_cache:
+                newHandler = self.handler_factory(self.name, selector)
+                self.addHandler(newHandler)
+                self._handler_cache[selector] = newHandler
+            return super(DynamicHandlerLogger, self).handle(record)
+
+
+    def server_filter(record):
+        server = getattr(record, "server", None)
+        return True if server else False
+
+
+    class ServerFilter(logging.Filter):
+        def __init__(self, server_name, name=''):
+            super(ServerFilter, self).__init__(name=name)
+            self.server_name = server_name
+
+        def filter(self, record):
+            server = getattr(record, "server", None)
+            if server and server == self.server_name:
+                return True
+            return False
+
+
+    class MainFilter(logging.Filter):
+        def filter(self, record):
+            return not server_filter(record)
+
+
+    def file_handler_factory(name, selector):
+        handler = logging.FileHandler(filename="%s.%s.log"%(name, selector), encoding="utf-8", mode="a")
+        formatter = logging.Formatter(DEFAULT_LOG_FORMAT)
+        handler.setFormatter(formatter)
+        handler.addFilter(ServerFilter(selector))
+        return handler
+
+
+    logger = DynamicHandlerLogger("my.company", handler_factory=file_handler_factory)
+    logger.setLevel(DEFAULT_LOG_LEVEL)
+    handler = logging.FileHandler(filename="my.company.log", encoding="utf-8", mode="a")
+    handler.addFilter(MainFilter())
+    handler.setLevel(DEFAULT_LOG_LEVEL)
+    formatter = logging.Formatter(DEFAULT_LOG_FORMAT)
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+
+    def process(server):
+        server_logger = logging.LoggerAdapter(logger, {'server': server})
+        server_logger.info("This should show up only in the server-specific log file for %s", server)
+        server_logger.info("another log message for %s", server)
+
+
+    def main():
+        # servers list retrieved from another function, just here for iteration
+        servers = ["server1", "server2", "server3"]
+
+        logger.info("This should show up in the console and main.log.")
+
+        for server in servers:
+            process(server)
+
+        logger.info("This should show up in the console and main.log again.")
+
+
+    if __name__ == "__main__":
+        main()
+
+## Closing Thoughts
+
+I feel like `logger.getChild` may be the right way to define this, but you'd need to be able to customize the logger primarily by specifying the log handler to use as well as to configure the propagation flag.
+
+For example, you could probably do something like
